@@ -15,7 +15,7 @@ load_dotenv()
 # Initialize FastAPI app
 app = FastAPI(
     title="YouTube Sentiment Analysis API",
-    description="Analyze sentiment of YouTube video comments using RoBERTa model",
+    description="Analyze sentiment of YouTube video comments using a lightweight model",
     version="1.0.0"
 )
 
@@ -24,9 +24,9 @@ YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 if not YOUTUBE_API_KEY:
     raise ValueError("YouTube API key not found in environment variables")
 
-# Initialize model globally
-print("Loading RoBERTa model...")
-MODEL_NAME = "cardiffnlp/twitter-roberta-base-sentiment"
+# Use a smaller model for space optimization
+print("Loading lightweight sentiment model...")
+MODEL_NAME = "distilbert-base-uncased-finetuned-sst-2-english"  # Smaller and faster
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
 print("Model loaded successfully!")
@@ -84,7 +84,7 @@ def analyze_sentiment(comment: str) -> str:
         probs = outputs.logits.softmax(dim=1).numpy()[0]
         
         # Map prediction to sentiment
-        sentiment_map = {0: "negative", 1: "neutral", 2: "positive"}
+        sentiment_map = {0: "negative", 1: "positive"}
         return sentiment_map[np.argmax(probs)]
     except Exception as e:
         print(f"Error analyzing comment: {str(e)}")
