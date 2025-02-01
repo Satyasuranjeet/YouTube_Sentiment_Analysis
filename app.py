@@ -1,126 +1,81 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, HttpUrl
+from flask import Flask, request, jsonify
 import requests
 import re
-from transformers import pipeline  # Use pipeline for lightweight inference
-import numpy as np
-from typing import List, Dict
+import nltk
+from nltk.sentiment import SentimentIntensityAnalyzer
 import os
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+app = Flask(__name__)
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="YouTube Sentiment Analysis API",
-    description="Analyze sentiment of YouTube video comments using a lightweight model",
-    version="1.0.0"
-)
+# Initialize Sentiment Analyzer
+nltk.download('vader_lexicon')
+sia = SentimentIntensityAnalyzer()
 
-# Configuration
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
-if not YOUTUBE_API_KEY:
-    raise ValueError("YouTube API key not found in environment variables")
+# YouTube API Key (Replace with your actual API key)
+API_KEY = os.getenv("YOUTUBE_API_KEY", "YOUR_YOUTUBE_API_KEY")
 
-# Use a lightweight sentiment analysis pipeline
-print("Loading lightweight sentiment model...")
-sentiment_pipeline = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
-print("Model loaded successfully!")
+def extract_video_id(video_url):
+    match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", video_url)
+    return match.group(1) if match else None
 
-# Pydantic models for request/response
-class VideoRequest(BaseModel):
-    video_url: HttpUrl
+def get_comments(video_id, max_results=100):
+    url = f"https://www.googleapis.com/youtube/v3/commentThreads?part=snippet&videoId={video_id}&key={API_KEY}&maxResults={max_results}"
+    response = requests.get(url).json()
+    comments = []
+    if "items" in response:
+        for item in response["items"]:
+            comment = item["snippet"]["topLevelComment"]["snippet"]["textDisplay"]
+            comments.append(comment)
+    return comments
 
-class SentimentResponse(BaseModel):
-    video_id: str
-    total_comments: int
-    sentiment_distribution: Dict[str, int]
-    sentiment_percentages: Dict[str, float]
-    sample_comments: Dict[str, List[str]]
-
-# Helper functions
-def extract_video_id(url: str) -> str:
-    """Extract video ID from YouTube URL."""
-    match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", str(url))
-    if not match:
-        raise HTTPException(status_code=400, detail="Invalid YouTube URL format")
-    return match.group(1)
-
-def get_comments(video_id: str, max_results: int = 50) -> List[str]:
-    """Fetch comments from YouTube API."""
-    url = f"https://www.googleapis.com/youtube/v3/commentThreads"
-    params = {
-        "part": "snippet",
-        "videoId": video_id,
-        "key": YOUTUBE_API_KEY,
-        "maxResults": max_results
-    }
-    
-    try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        data = response.json()
-        
-        if "items" not in data:
-            raise HTTPException(status_code=404, detail="No comments found")
-            
-        return [
-            item["snippet"]["topLevelComment"]["snippet"]["textDisplay"]
-            for item in data["items"]
-        ]
-    except requests.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"YouTube API error: {str(e)}")
-
-def analyze_sentiment(comment: str) -> str:
-    """Analyze sentiment of a single comment."""
-    try:
-        result = sentiment_pipeline(comment[:512])[0]
-        return result["label"].lower()
-    except Exception as e:
-        print(f"Error analyzing comment: {str(e)}")
-        return "neutral"  # Default to neutral on error
-
-@app.post("/analyze", response_model=SentimentResponse)
-async def analyze_video(request: VideoRequest):
-    """
-    Analyze sentiment of YouTube video comments.
-    Returns sentiment distribution and sample comments for each category.
-    """
-    # Extract video ID
-    video_id = extract_video_id(request.video_url)
-    
-    # Get comments (limit to 50 to reduce memory usage)
-    comments = get_comments(video_id, max_results=50)
-    
-    # Initialize results
+def analyze_sentiments(comments):
     sentiments = {"positive": 0, "negative": 0, "neutral": 0}
-    sample_comments = {"positive": [], "negative": [], "neutral": []}
     
-    # Analyze comments
     for comment in comments:
-        sentiment = analyze_sentiment(comment)
-        sentiments[sentiment] += 1
-        
-        # Store sample comments (up to 3 per category)
-        if len(sample_comments[sentiment]) < 3:
-            sample_comments[sentiment].append(comment)
+        score = sia.polarity_scores(comment)["compound"]
+        if score >= 0.05:
+            sentiments["positive"] += 1
+        elif score <= -0.05:
+            sentiments["negative"] += 1
+        else:
+            sentiments["neutral"] += 1
     
-    # Calculate percentages
-    total_comments = sum(sentiments.values())
-    sentiment_percentages = {
-        k: round(v / total_comments * 100, 2)
-        for k, v in sentiments.items()
-    }
+    return sentiments
+
+@app.route("/analyze", methods=["POST"])
+def analyze_video():
+    data = request.get_json()
+    video_url = data.get("url")
     
-    return SentimentResponse(
-        video_id=video_id,
-        total_comments=total_comments,
-        sentiment_distribution=sentiments,
-        sentiment_percentages=sentiment_percentages,
-        sample_comments=sample_comments
-    )
+    if not video_url:
+        return jsonify({"error": "YouTube URL is required"}), 400
+    
+    video_id = extract_video_id(video_url)
+    if not video_id:
+        return jsonify({"error": "Invalid YouTube URL"}), 400
+    
+    comments = get_comments(video_id)
+    if not comments:
+        return jsonify({"error": "No comments found"}), 404
+    
+    sentiment_results = analyze_sentiments(comments)
+    total_comments = sum(sentiment_results.values())
+    
+    positive_ratio = (sentiment_results["positive"] / total_comments) * 100 if total_comments else 0
+    negative_ratio = (sentiment_results["negative"] / total_comments) * 100 if total_comments else 0
+    
+    verdict = "Genuine" if positive_ratio > negative_ratio else "Suspicious"
+    
+    return jsonify({
+        "total_comments": total_comments,
+        "positive": sentiment_results["positive"],
+        "negative": sentiment_results["negative"],
+        "neutral": sentiment_results["neutral"],
+        "positive_ratio": round(positive_ratio, 2),
+        "negative_ratio": round(negative_ratio, 2),
+        "verdict": verdict
+    })
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
