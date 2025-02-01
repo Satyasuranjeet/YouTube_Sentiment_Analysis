@@ -2,10 +2,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
 import requests
 import re
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from transformers import pipeline  # Use pipeline for lightweight inference
 import numpy as np
 from typing import List, Dict
-import torch
 import os
 from dotenv import load_dotenv
 
@@ -24,11 +23,9 @@ YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 if not YOUTUBE_API_KEY:
     raise ValueError("YouTube API key not found in environment variables")
 
-# Use a smaller model for space optimization
+# Use a lightweight sentiment analysis pipeline
 print("Loading lightweight sentiment model...")
-MODEL_NAME = "distilbert-base-uncased-finetuned-sst-2-english"  # Smaller and faster
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
+sentiment_pipeline = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
 print("Model loaded successfully!")
 
 # Pydantic models for request/response
@@ -50,7 +47,7 @@ def extract_video_id(url: str) -> str:
         raise HTTPException(status_code=400, detail="Invalid YouTube URL format")
     return match.group(1)
 
-def get_comments(video_id: str, max_results: int = 100) -> List[str]:
+def get_comments(video_id: str, max_results: int = 50) -> List[str]:
     """Fetch comments from YouTube API."""
     url = f"https://www.googleapis.com/youtube/v3/commentThreads"
     params = {
@@ -78,14 +75,8 @@ def get_comments(video_id: str, max_results: int = 100) -> List[str]:
 def analyze_sentiment(comment: str) -> str:
     """Analyze sentiment of a single comment."""
     try:
-        inputs = tokenizer(comment[:512], return_tensors="pt", truncation=True)
-        with torch.no_grad():
-            outputs = model(**inputs)
-        probs = outputs.logits.softmax(dim=1).numpy()[0]
-        
-        # Map prediction to sentiment
-        sentiment_map = {0: "negative", 1: "positive"}
-        return sentiment_map[np.argmax(probs)]
+        result = sentiment_pipeline(comment[:512])[0]
+        return result["label"].lower()
     except Exception as e:
         print(f"Error analyzing comment: {str(e)}")
         return "neutral"  # Default to neutral on error
@@ -99,8 +90,8 @@ async def analyze_video(request: VideoRequest):
     # Extract video ID
     video_id = extract_video_id(request.video_url)
     
-    # Get comments
-    comments = get_comments(video_id)
+    # Get comments (limit to 50 to reduce memory usage)
+    comments = get_comments(video_id, max_results=50)
     
     # Initialize results
     sentiments = {"positive": 0, "negative": 0, "neutral": 0}
